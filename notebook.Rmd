@@ -1,0 +1,287 @@
+---
+title: "Field Experiments"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(patchwork)
+
+theme_set(theme_minimal() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(color = "transparent", fill = "grey90"),
+        text = element_text(family = "Arial", color = viridis::viridis(1))))
+  
+```
+
+# Chapter 1
+
+The big issue with the data we have lying around is that unobservables are correlated with treatment adn effect. If you want to measure the effect of prep courses on SAT scores, you'd likely find household income to be a confounder. Also, its freaking hard to find all your confounders, so its useful to just rely on randomization. If you randomize your treatment, can't nothing be confounding it. When we say experiemnts, we mean field experiments. Lab experiments are designed to test causal claims with minimal reliance on assumptions whereas field experiemnts are designed to test causal claims in the real world, only dependent on assumptions of that real world.
+
+# Chapter 2 - Causal inference and Experimentation
+
+Below we have a table of potential outcomes. Note the last two columns... you only actually observe one potential outcome!
+
+```{r}
+df <- tibble(
+  village = 1:7,
+  yi0 = c(10, 15, 20, 20, 10, 15, 15),
+  yi1 = c(15, 15, 30, 15, 20, 15, 30),
+  treatment = c(1, 0,0,0,0,0,1),
+  observed = ifelse(treatment == 0, yi0, yi1))
+df
+```
+
+We define the average treatment effect below.
+
+```{r}
+df %>%
+  mutate(diff = yi1 - yi0) %>%
+  summarise(ATE = mean(diff))
+```
+
+## Random sampling and expectations
+
+A random variable is a quantity that varies from sample to sample. An expected value is the average value of a random variable. The expected value of a sample average is equal to the average of the population from which the sample is drawn.
+
+For example, lets repeatedly draw samples of size 10 from a population with mean 5 and std.dev 10.
+
+```{r}
+library(scales)
+purrr::rerun(1e4, mean(rnorm(10, 5, 10))) %>% 
+  as_vector() ->
+  v
+
+tibble(sample_mean = v,
+       cumulative_mean = cummean(v)) %>% 
+  mutate(sample = row_number()) %>% 
+  ggplot(aes(x = sample, y = cumulative_mean, color = factor("Cumulative Mean"))) +
+    geom_point(aes(y = sample_mean), color = viridis::viridis(5)[4], alpha = .3) +
+    geom_line(size = 1, color = viridis::viridis(1)) +
+  scale_color_manual(values = "black") +
+  scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x))) +
+  scale_y_continuous(breaks = seq(-10, 20, 2)) +
+  labs(title = "Expected value of a random variable equals its population average",
+       subtitle = "Expected value of a random variable equals its average value across samples",
+       x = "log(sample #)",
+       y = "Sample Mean") +
+  theme(panel.grid.major.y = element_line(color = "white"),
+        legend.position = "bottom",
+        legend.title = element_blank())
+```
+
+
+
+$$
+\begin{align}
+& E[Y_i(1) - Y_i(0)] =\\
+& E[Y_i(1)] - E[Y_i(0)] =\\
+& \frac{1}{N} \sum_{i=1}^N Y_i[1] - \frac{1}{N} \sum_{i=1}^N Y_i[0] =\\
+& \frac{1}{N}\sum_{i=1}^N[ Y_i[1] - Y_i[0]  ]
+\end{align}
+$$
+
+```{r}
+sum((df$yi1 - df$yi0)) / nrow(df)
+```
+
+When treatment is allocated randomly, the treated group and untreated groups are samples of the larger population. Therefore, an estimate of a population level parameter should be equal to the population level parameter in expectation if the estimator is unbiased.
+
+```{r}
+sim <- function() {
+  df_random <- tibble(
+    village = 1:7,
+    yi0 = df$yi0,
+    yi1 = df$yi1,
+    permutations = sample(village),
+    observed = ifelse(permutations <= 3, yi1, yi0),
+    treatment1 = ifelse(permutations <= 3, 1, 0),
+    treatment0 = treatment1*-1 + 1)
+ 
+  mean(df_random[df_random$treatment1 == 1,]$observed) -
+    mean(df_random[df_random$treatment0 == 1,]$observed)
+}
+
+N<-5e3
+mean(map_dbl(1:N, ~sim()))
+```
+
+In the absence of random selection. We measure selection bias like so.
+
+```{r}
+tibble(
+  "Observed ATE" =
+    mean(df[df$treatment == 1,]$observed) - mean(df[df$treatment == 0,]$observed),
+  "Treatment effect among treated" =
+    mean(df[df$treatment == 1,]$yi1) - mean(df[df$treatment == 1,]$yi0),
+  "Selection bias" =
+    mean(df[df$treatment == 1,]$yi0) - mean(df[df$treatment == 0,]$yi0)
+)
+```
+
+Three core assumptions must be met for us to believe in our causal inference.
+1. Random Assignment - Treatment assignment must be statistically independent of the subject's potential outcomes.
+2. Excludability - Treatment assignment itself should not kick off anything else that can affect the outcome.
+3. Non-Interference - Subjects are unaffected by each other
+
+# Chapter 3 - Sampling Distributinos, Statistical Interference, and Hypothesis Testing
+
+
+## Standard Error
+The sampling distribution is the collection of estimates that would result from repeated experimentation with different random assignments. Sampling variability is typically expressed using the standard error. The standard error is the standard deviation of the sampling distribution, which is of cource the collection of ATEs from every possible randomization scheme.
+
+$$
+SE(\hat{ATE}) = \sqrt{\frac{1}{N-1} \bigg(
+  \frac{m}{N-m}Var(Y_i(0)) + \frac{N-m}{m}Var(Y_i(1)) + 2Cov(Y_i(0),Y_i(1))
+  \bigg)}
+$$
+
+You can pretty much estimate all of the elements of this formula ahead of time. N, the sample size, and m, the number of treated units, are obviously known. $Y_i(0)$ and $Y_i(1)$ can be estimated from the sample (assuming random assignment). The only thing that can't be estimated is the covariance between potential outcomes. This is a tricky one too because it can affect our sampling variance a lot! If covariance is high, then results are sensitive to random assignment. The formula also implies that increasing N, the number of observation, decreases the standard error. Adding observations in either group helps. Smaller outcome variance, $Y_i(0), Y_i(1)$, decreases the standard error. In particular, you should invest in outcomes with greater variance as that will have the largest effect. We simulate this below.
+
+```{r fig.height=7, fig.width=6, warning=FALSE}
+sim_potential_outcomes <- function(
+  mu_1 = 15, # avg pi1
+  mu_0 = 10, # avg pi0
+  sigma_1 = 4, # std.dev pi1
+  sigma_0 = 2, # std.dev pi0
+  rho = .81,  # correlation between potential outcomes  
+  N = 7) {
+  
+  # Set up covariance matrix
+  Mus <- c(mu_1, mu_0)
+  Sigmas <- c(sigma_0, sigma_1)
+  Rho <- matrix(c(1, rho, rho, 1), nrow = 2)
+  Sigma <- diag(Sigmas) %*% Rho %*% diag(Sigmas)
+ 
+  # Generate potential outcomes
+  df_sim <- as_tibble(MASS::mvrnorm(N, Mus, Sigma)) %>%
+    set_names(c("Pi(1)", "Pi(0)"))
+ 
+  # Assign random treatment
+  df_sim$treatment <- sample(c(1,0), size = nrow(df_sim), replace = TRUE)
+ 
+  # Calculate standard error
+  stderr <- df_sim %>% 
+    summarise(stderr =
+                1/(n()-1) * (
+                  (sum(treatment)*var(`Pi(0)`)/(n()-sum(treatment))) +
+                    ((n()-sum(treatment))*var(`Pi(1)`))/sum(treatment) +
+                    2 * cov(`Pi(0)`,`Pi(1)`))) %>%
+    pull(stderr)
+ 
+  c(Correlation = Rho,
+    Covariance = cov(df_sim$`Pi(1)`, df_sim$`Pi(0)`),
+    std.err = stderr)
+}
+
+map(seq(-1, 1, .2),
+    ~sim_potential_outcomes(N = 1e3, rho = .x)) %>%
+  reduce(rbind) %>%
+  as_tibble() %>% 
+ggplot(aes(Covariance, std.err, color = as.factor("Simulated data points"))) +
+  geom_point(size = 2) +
+  scale_y_continuous(breaks = seq(0, .05, .01), limits = c(0, .05)) +
+  scale_color_viridis_d() +
+  labs(title = "Standard errors are increasing in covariance",
+       subtitle = "") +
+  theme(panel.grid.major.y = element_line(color = "white"),
+        legend.position="none",
+        legend.title = element_blank(),
+        axis.line.x.bottom = element_line(color = "#BDC3C7")) ->
+  p1
+
+N_samples <- seq(10, 100, 10)
+map(N_samples,
+    ~sim_potential_outcomes(N = .x)) %>%
+  reduce(rbind) %>%
+  as_tibble() %>%
+  mutate(N_samples = N_samples) %>% 
+ggplot(aes(N_samples, std.err, color = as.factor("Simulated data points"))) +
+  geom_point(size = 2) +
+  scale_color_viridis_d() +
+  labs(title = "Standard errors decrease with increased sample size",
+       subtitle = "") +
+  theme(panel.grid.major.y = element_line(color = "white"),
+        legend.position="none",
+        legend.title = element_blank(),
+        axis.line.x.bottom = element_line(color = "#BDC3C7")) ->
+  p2
+
+sigma <- seq(10, 100, 10)
+map(sigma,
+    ~sim_potential_outcomes(sigma_1 = .x, sigma_0 = .x)) %>%
+  reduce(rbind) %>%
+  as_tibble() %>%
+  mutate(sigma = sigma) %>% 
+ggplot(aes(sigma, std.err, color = as.factor("Simulated data points"))) +
+  geom_point(size = 2) +
+  scale_color_viridis_d() +
+  labs(title = "Standard errors increase with larger outcome variance",
+       subtitle = "") +
+  theme(panel.grid.major.y = element_line(color = "white"),
+        legend.position="bottom",
+        legend.title = element_blank(),
+        axis.line.x.bottom = element_line(color = "#BDC3C7")) ->
+  p3
+
+p1 / p2 / p3
+```
+
+Unlike our simulation, we don't observe the full schedule of potential outcomes in reality. Instead, we have a single experimental draw with one instance of random assignment. We use this instance to use estimates for every part of the standard error equation. The only thing we can't estimate is the covariance between potential outcomes - so we use a conservative estimate instead and assume the correlation between $Y_i(0)$ and $Y_i(1)$ is $1.0$.
+
+$$
+\widehat{SE} = \sqrt{\frac{\widehat{Var}Y_i(0)}{N-m} + \frac{\widehat{Var}Y_i(1)}{m}} \\
+
+$$
+
+## Hypothesis Testing
+
+If we assume that there is no treatment effect, and $Y_i(0) = Y_i(1)$, we actually do have the full schedule of potential outcomes and our estimation task becomes much easier. We can simply simulate every possible random assignment (or a sufficiently large number of random assignments) and observe the distribution of ATEs. We can use this distribution to determine the probability that an observed ATE gets generated by the null distribution, or, distribution when $Y_i(0) = Y_i(1)$. 
+
+We simulate this below with the data from table 2.2.
+
+```{r}
+df <- tibble(
+  village = 1:7,
+  outcome = c(15, 15, 20, 20, 10, 15, 30),
+  treatment = c(1,0,0,0,0,0,1))
+df
+```
+
+```{r}
+permutation_test <- function() {
+  df %>% 
+    mutate(ri = sample(treatment)) %>% 
+    lm(outcome ~ ri, data = .) %>% 
+    coef() %>% 
+    magrittr::extract(2)
+  }
+simulations <- tibble(
+  ate = as_vector(rerun(1e4, permutation_test())))
+
+simulations %>% 
+  ggplot(aes(ate)) +
+    geom_histogram(fill = viridis::viridis(1)) +
+    scale_x_continuous(breaks = unique(simulations$ate)) +
+    scale_y_continuous(breaks = seq(0, 3000, 500)) +
+    theme(panel.grid.major.y = element_line(color = "white")) +
+    labs(title = "Randomization inference",
+         subtitle = "-7.5 to 10",
+         x = "Simulated average treatment effects",
+         y = "Frequency")
+```
+
+If we run an experiment and observe a treatment effect of 6.5, we can now calculate the probability that 6.5 was generated by null distribution. 
+
+```{r}
+paste("One sided p-value:", length(simulations$ate[simulations$ate >= 6.5])/1e4)
+paste("Two sided p-value:", length(simulations$ate[abs(simulations$ate) >= 6.5])/1e4)
+```
+
+## Confidence Intervals
+
+
+
+
